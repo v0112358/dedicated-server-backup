@@ -10,7 +10,8 @@ BACKUP_AGENT_LOG="/var/log/backup-agent.log"
 BACKUP_MYSQL="yes"
 BACKUP_MONGO="no"
 BACKUP_PERCONA_XTRABACKUP="no"
-REVISION=7
+REVISION_COUNT=7
+REVISION_DIR_DIGITS=3
 
 # Enable debug bash shell
 set -xv
@@ -43,23 +44,55 @@ if [[ $BACKUP_MYSQL == "yes" ]]; then
 	echo "----- $(date): End dump mysql database" >> $BACKUP_AGENT_LOG
 fi
 
-# Backup source code and database to rsync daemon server
+# Backup source code and database to $DEST_DIR
 [[ ! -d $DEST_DIR ]] && mkdir -p $DEST_DIR 
 echo "----- $(date): Begin save backup" >> $BACKUP_AGENT_LOG
 rsync -avr --progress --delete --bwlimit=$BANDWIDTH_LIMIT --link-dest "../001" $SOURCE_DIR $DEST_DIR/000
 
-# Rotate backup
-revision=$REVISION
-while [[ $revision -gt 0 ]]; do
-	((revision--))
-	revisionDir="$DEST_DIR/$(padRevisionDirPart $revision)"
-	
-	if [[ -d $revisionDir ]]; then
-		revisionDirNext="$DEST_DIR/$(padRevisionDirPart $(($revision + 1)))"
-		mv "$revisionDir" "$revisionDirNext"
-        echo "Info: Moved [$revisionDir] -> [$revisionDirNext]" >> $BACKUP_AGENT_LOG
-	fi
-done
 # Remove db dump file
 find $DB_DIR -type f -name "*.sql.gz" -delete
 echo "----- $(date): End save backup" >> $BACKUP_AGENT_LOG
+
+# Rotate backup
+# Remove oldest backup
+echo "----- $(date): Begin rotate backup" >> $BACKUP_AGENT_LOG
+revisionDirRegexp="^[0-9]{${REVISION_DIR_DIGITS}}$"
+IFS=$'\n'
+for backupBaseDir in $(ls -1 "$DEST_DIR/."); do
+	revisionDir="$DEST_DIR/$backupBaseDir"
+
+	# skip anything not a directory or not exactly three digits
+	if [[
+		(! -d $revisionDir) ||
+		(! $backupBaseDir =~ $revisionDirRegexp)
+	]]; then
+		continue
+	fi
+
+	# convert to revision integer
+	revision=$((10#$backupBaseDir))
+
+	# above revision retention count?
+	if [[ $revision -ge $REVISION_COUNT ]]; then
+		# drop revision outside range
+		chmod --recursive u+w "$revisionDir"
+		rm --force --recursive "$revisionDir"
+		echo "Info: Removed revision [$revisionDir]" >> $BACKUP_AGENT_LOG
+	fi
+done
+
+unset IFS
+
+revision=$REVISION_COUNT
+while [[ $revision -gt 0 ]]; do
+	((revision--))
+	revisionDir="$DEST_DIR/$(padRevisionDirPart $revision)"
+
+	if [[ -d $revisionDir ]]; then
+		revisionDirNext="$DEST_DIR/$(padRevisionDirPart $(($revision + 1)))"
+		mv "$revisionDir" "$revisionDirNext"
+
+		echo "Moved [$revisionDir] -> [$revisionDirNext]" >> $BACKUP_AGENT_LOG
+	fi
+done
+echo "----- $(date): End rotate backup" >> $BACKUP_AGENT_LOG
